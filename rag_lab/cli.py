@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+import random
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict
@@ -24,14 +25,16 @@ from .utils.timing import Timer, PerformanceTracker
 from .utils.io import save_experiment_results, save_csv
 
 
-def create_run_config(config: Config, retriever_type: str, k: int, max_samples: Optional[int] = None) -> Dict:
+def create_run_config(config: Config, retriever_type: str, k: int, max_samples: Optional[int] = None, shuffle: bool = False, seed: Optional[int] = None) -> Dict:
     """Create a minimal config containing only run-specific information."""
     run_config = {
         "experiment": {
             "retriever_type": retriever_type,
             "k": k,
             "max_samples": max_samples,
-            "seed": config.seed,
+            "shuffle": shuffle,
+            "shuffle_seed": seed if seed is not None else config.seed,
+            "config_seed": config.seed,
             "dataset_name": config.dataset.name,
             "dataset_split": config.dataset.split
         },
@@ -184,7 +187,7 @@ def build_index(config: Config, dataset: str, retriever_type: str):
 
 
 def run_experiment(config: Config, dataset: str, retriever_type: str, k: int = 5, 
-                  max_samples: Optional[int] = None):
+                  max_samples: Optional[int] = None, shuffle: bool = False, seed: Optional[int] = None):
     """Run a single RAG experiment."""
     print(f"Running experiment: {retriever_type} retriever, k={k}")
     
@@ -198,7 +201,21 @@ def run_experiment(config: Config, dataset: str, retriever_type: str, k: int = 5
     # Get QA pairs
     qa_pairs = dataset_loader.get_qa_pairs()
     if max_samples:
-        qa_pairs = qa_pairs[:max_samples]
+        # Auto-enable shuffle if seed is provided
+        if seed is not None:
+            shuffle = True
+            
+        if shuffle:
+            # Use provided seed or fall back to config seed
+            shuffle_seed = seed if seed is not None else config.seed
+            random.seed(shuffle_seed)
+            qa_pairs_copy = qa_pairs.copy()
+            random.shuffle(qa_pairs_copy)
+            qa_pairs = qa_pairs_copy[:max_samples]
+            print(f"Shuffled and sampled {len(qa_pairs)} QA pairs (seed: {shuffle_seed})")
+        else:
+            qa_pairs = qa_pairs[:max_samples]
+            print(f"Sampled first {len(qa_pairs)} QA pairs")
     
     print(f"Evaluating on {len(qa_pairs)} QA pairs")
     
@@ -347,7 +364,7 @@ def run_experiment(config: Config, dataset: str, retriever_type: str, k: int = 5
     experiment_name = f"{retriever_type}_k{k}"
     
     # Create minimal run-specific config
-    run_config = create_run_config(config, retriever_type, k, max_samples)
+    run_config = create_run_config(config, retriever_type, k, max_samples, shuffle, seed)
     
     save_experiment_results(
         {
@@ -380,7 +397,7 @@ def run_experiment(config: Config, dataset: str, retriever_type: str, k: int = 5
 
 
 def run_experiment_with_qa_pairs(config: Config, dataset: str, retriever_type: str, k: int,
-                                dataset_loader: SquadDataset, qa_pairs: List, max_samples: Optional[int] = None) -> Tuple[Dict, List]:
+                                dataset_loader: SquadDataset, qa_pairs: List, max_samples: Optional[int] = None, shuffle: bool = False, seed: Optional[int] = None) -> Tuple[Dict, List]:
     """Run a single RAG experiment with pre-selected QA pairs."""
     print(f"Running experiment: {retriever_type} retriever, k={k}")
     print(f"Evaluating on {len(qa_pairs)} QA pairs (pre-selected for consistency)")
@@ -532,7 +549,7 @@ def run_experiment_with_qa_pairs(config: Config, dataset: str, retriever_type: s
     experiment_name = f"{retriever_type}_k{k}"
     
     # Create minimal run-specific config
-    run_config = create_run_config(config, retriever_type, k, max_samples)
+    run_config = create_run_config(config, retriever_type, k, max_samples, shuffle, seed)
     
     save_experiment_results(
         {
@@ -565,7 +582,7 @@ def run_experiment_with_qa_pairs(config: Config, dataset: str, retriever_type: s
 
 
 def run_sweep(config: Config, retrievers: List[str], k_values: List[int], 
-              dataset: str = "squad", max_samples: Optional[int] = None):
+              dataset: str = "squad", max_samples: Optional[int] = None, shuffle: bool = False, seed: Optional[int] = None):
     """Run experiments across multiple retrievers and k values."""
     print(f"Running sweep: {retrievers} retrievers, k={k_values}")
     
@@ -579,7 +596,21 @@ def run_sweep(config: Config, retrievers: List[str], k_values: List[int],
     # Get the same QA pairs that will be used for all experiments
     all_qa_pairs = dataset_loader.get_qa_pairs()
     if max_samples:
-        selected_qa_pairs = all_qa_pairs[:max_samples]
+        # Auto-enable shuffle if seed is provided
+        if seed is not None:
+            shuffle = True
+            
+        if shuffle:
+            # Use provided seed or fall back to config seed
+            shuffle_seed = seed if seed is not None else config.seed
+            random.seed(shuffle_seed)
+            qa_pairs_copy = all_qa_pairs.copy()
+            random.shuffle(qa_pairs_copy)
+            selected_qa_pairs = qa_pairs_copy[:max_samples]
+            print(f"Shuffled and sampled {len(selected_qa_pairs)} QA pairs (seed: {shuffle_seed})")
+        else:
+            selected_qa_pairs = all_qa_pairs[:max_samples]
+            print(f"Sampled first {len(selected_qa_pairs)} QA pairs")
     else:
         selected_qa_pairs = all_qa_pairs
     
@@ -604,7 +635,7 @@ def run_sweep(config: Config, retrievers: List[str], k_values: List[int],
             try:
                 # Run experiment with pre-selected QA pairs
                 metrics, _ = run_experiment_with_qa_pairs(config, dataset, retriever_type, k, 
-                                                        dataset_loader, selected_qa_pairs, max_samples)
+                                                        dataset_loader, selected_qa_pairs, max_samples, shuffle, seed)
                 
                 # Store result
                 sweep_results.append({
@@ -668,6 +699,8 @@ def main():
                            help="Retriever type")
     run_parser.add_argument("--k", type=int, default=5, help="Number of documents to retrieve")
     run_parser.add_argument("--max-samples", type=int, help="Maximum number of QA pairs to evaluate")
+    run_parser.add_argument("--shuffle", action="store_true", help="Shuffle data before sampling")
+    run_parser.add_argument("--seed", type=int, help="Random seed for shuffling (overrides config seed)")
     
     # Sweep command
     sweep_parser = subparsers.add_parser("sweep", help="Run experiment sweep")
@@ -679,6 +712,8 @@ def main():
                              help="k values to test")
     sweep_parser.add_argument("--dataset", default="squad", help="Dataset name")
     sweep_parser.add_argument("--max-samples", type=int, help="Maximum number of QA pairs to evaluate")
+    sweep_parser.add_argument("--shuffle", action="store_true", help="Shuffle data before sampling")
+    sweep_parser.add_argument("--seed", type=int, help="Random seed for shuffling (overrides config seed)")
     
     args = parser.parse_args()
     
@@ -695,10 +730,10 @@ def main():
         build_index(config, args.dataset, args.retriever)
     
     elif args.command == "run":
-        run_experiment(config, args.dataset, args.retriever, args.k, args.max_samples)
+        run_experiment(config, args.dataset, args.retriever, args.k, args.max_samples, args.shuffle, args.seed)
     
     elif args.command == "sweep":
-        run_sweep(config, args.retrievers, args.k, args.dataset, args.max_samples)
+        run_sweep(config, args.retrievers, args.k, args.dataset, args.max_samples, args.shuffle, args.seed)
 
 
 if __name__ == "__main__":
