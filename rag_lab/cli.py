@@ -4,7 +4,7 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple, Dict
 
 import tyro
 
@@ -21,6 +21,80 @@ from .eval.retrieval_metrics import evaluate_retrieval_batch, compute_retrieval_
 from .utils.seeds import set_seed
 from .utils.timing import Timer, PerformanceTracker
 from .utils.io import save_experiment_results, save_csv
+
+
+def create_run_config(config: Config, retriever_type: str, k: int, max_samples: Optional[int] = None) -> Dict:
+    """Create a minimal config containing only run-specific information."""
+    run_config = {
+        "experiment": {
+            "retriever_type": retriever_type,
+            "k": k,
+            "max_samples": max_samples,
+            "seed": config.seed,
+            "dataset_name": config.dataset.name,
+            "dataset_split": config.dataset.split
+        },
+        "generator": {
+            "model_name": config.generator.model_name,
+            "max_new_tokens": config.generator.max_new_tokens,
+            "temperature": config.generator.temperature,
+            "top_p": config.generator.top_p,
+            "context_token_budget": config.generator.context_token_budget,
+            "device": config.generator.device.device,
+            "torch_dtype": config.generator.device.torch_dtype
+        }
+    }
+    
+    # Add retriever-specific config only for the retriever being used
+    if retriever_type != "none":
+        retriever_config = config.get_retriever_config(retriever_type)
+        
+        if retriever_type == "boolean":
+            run_config["retriever"] = {
+                "type": "boolean",
+                "normalize_tokens": retriever_config.normalize_tokens,
+                "case_sensitive": retriever_config.case_sensitive
+            }
+        elif retriever_type == "tfidf":
+            run_config["retriever"] = {
+                "type": "tfidf",
+                "ngram_range": retriever_config.ngram_range,
+                "min_df": retriever_config.min_df,
+                "max_df": retriever_config.max_df,
+                "norm": retriever_config.norm
+            }
+        elif retriever_type == "bm25":
+            run_config["retriever"] = {
+                "type": "bm25",
+                "k1": retriever_config.k1,
+                "b": retriever_config.b
+            }
+        elif retriever_type == "dense":
+            run_config["retriever"] = {
+                "type": "dense",
+                "model_name": retriever_config.model_name,
+                "normalize_embeddings": retriever_config.normalize_embeddings,
+                "faiss_index_type": retriever_config.faiss_index_type,
+                "batch_size": retriever_config.batch_size
+            }
+        elif retriever_type == "sota":
+            run_config["retriever"] = {
+                "type": "sota",
+                "model_name": retriever_config.model_name,
+                "normalize_embeddings": retriever_config.normalize_embeddings,
+                "faiss_index_type": retriever_config.faiss_index_type,
+                "batch_size": retriever_config.batch_size,
+                "k_rerank": retriever_config.k_rerank,
+                "cross_encoder_model": retriever_config.cross_encoder_model,
+                "rerank_batch_size": retriever_config.rerank_batch_size
+            }
+    else:
+        run_config["retriever"] = {
+            "type": "none",
+            "description": "Direct generation without retrieval"
+        }
+    
+    return run_config
 
 
 def get_retriever(retriever_type: str, config: Config):
@@ -244,11 +318,14 @@ def run_experiment(config: Config, dataset: str, retriever_type: str, k: int = 5
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     experiment_name = f"{retriever_type}_k{k}"
     
+    # Create minimal run-specific config
+    run_config = create_run_config(config, retriever_type, k, max_samples)
+    
     save_experiment_results(
         {
             "metrics": all_metrics,
             "predictions": results,
-            "config": config.dict()
+            "config": run_config
         },
         config.output.base_dir,
         experiment_name,
@@ -274,15 +351,189 @@ def run_experiment(config: Config, dataset: str, retriever_type: str, k: int = 5
     return all_metrics, results
 
 
+def run_experiment_with_qa_pairs(config: Config, dataset: str, retriever_type: str, k: int,
+                                dataset_loader: SquadDataset, qa_pairs: List) -> Tuple[Dict, List]:
+    """Run a single RAG experiment with pre-selected QA pairs."""
+    print(f"Running experiment: {retriever_type} retriever, k={k}")
+    print(f"Evaluating on {len(qa_pairs)} QA pairs (pre-selected for consistency)")
+    
+    # Set seed for reproducibility
+    set_seed(config.seed)
+    
+    # Get corpus and retriever (dataset already loaded)
+    corpus = dataset_loader.get_corpus()
+    
+    if retriever_type == "none":
+        print("Running in direct generation mode (no retrieval)")
+        retriever = None
+    else:
+        # Get retriever
+        retriever = get_retriever(retriever_type, config)
+        
+        # Load or build index
+        index_path = config.output.get_index_dir(dataset, retriever_type)
+        if index_path.exists():
+            print(f"Loading existing index from {index_path}")
+            retriever.load_index(index_path)
+        else:
+            print(f"Building new index at {index_path}")
+            retriever.index(corpus)
+            retriever.save_index(index_path)
+    
+    # Initialize generator
+    generator = QwenGenerator(config.generator)
+    
+    # Performance tracking
+    perf_tracker = PerformanceTracker()
+    
+    # Run experiments
+    results = []
+    retrieval_times = []
+    generation_times = []
+    
+    for i, qa_pair in enumerate(qa_pairs):
+        if i % 100 == 0:
+            print(f"Processing QA pair {i+1}/{len(qa_pairs)}")
+        
+        # Retrieve documents (if retriever exists)
+        if retriever is not None:
+            with Timer("Retrieval") as timer:
+                retrieved_docs = retriever.retrieve(qa_pair.question, k)
+            retrieval_times.append(timer.elapsed_time)
+            
+            # Get passages
+            passages = []
+            doc_ids = []
+            for doc_id, score in retrieved_docs:
+                if doc_id < len(corpus):
+                    passages.append(corpus[doc_id])
+                    doc_ids.append(doc_id)
+        else:
+            # No retrieval - direct generation
+            retrieval_times.append(0.0)  # No retrieval time
+            passages = []
+            doc_ids = []
+            retrieved_docs = []
+        
+        # Generate answer
+        with Timer("Generation") as timer:
+            generation_result = generator.generate(qa_pair.question, passages, doc_ids, k)
+        generation_times.append(timer.elapsed_time)
+        
+        # Store result
+        result = {
+            "qa_id": qa_pair.id,
+            "question": qa_pair.question,
+            "ground_truth": qa_pair.answer,
+            "ground_truth_answers": qa_pair.answers,
+            "answer": generation_result["answer"],
+            "predicted_answer": generation_result["answer"],
+            "retrieved_docs": doc_ids,
+            "retrieval_scores": [score for _, score in retrieved_docs],
+            "passages_used": generation_result["passages_used"],
+            "retrieval_time": retrieval_times[-1],
+            "generation_time": generation_times[-1],
+            "tokens_generated": generation_result["tokens_generated"],
+            "is_impossible": qa_pair.is_impossible
+        }
+        results.append(result)
+        
+        # Track performance
+        perf_tracker.add_metric("retrieval_time", retrieval_times[-1])
+        perf_tracker.add_metric("generation_time", generation_times[-1])
+    
+    # Evaluate results
+    print("Evaluating results...")
+    
+    # SQuAD metrics
+    squad_metrics = evaluate_squad_batch(results, qa_pairs)
+    
+    # Retrieval metrics (only if retriever was used)
+    if retriever is not None:
+        retrieved_docs_list = [result["retrieved_docs"] for result in results]
+        # For now, assume all documents are equally relevant (simplified)
+        relevant_docs_list = [set(range(len(corpus))) for _ in results]
+        retrieval_metrics = evaluate_retrieval_batch(retrieved_docs_list, relevant_docs_list, [k])
+    else:
+        # No retrieval metrics for direct generation
+        retrieval_metrics = {}
+    
+    # Performance metrics
+    performance_metrics = {
+        "avg_retrieval_time": perf_tracker.get_stats("retrieval_time")["mean"],
+        "avg_generation_time": perf_tracker.get_stats("generation_time")["mean"],
+        "total_time": sum(retrieval_times) + sum(generation_times)
+    }
+    
+    # Combine all metrics
+    all_metrics = {
+        **squad_metrics,
+        **retrieval_metrics,
+        **performance_metrics
+    }
+    
+    # Save experiment results with minimal config
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_name = f"{retriever_type}_k{k}"
+    
+    # Create minimal run-specific config
+    run_config = create_run_config(config, retriever_type, k, max_samples)
+    
+    save_experiment_results(
+        {
+            "metrics": all_metrics,
+            "predictions": results,
+            "config": run_config
+        },
+        config.output.base_dir,
+        experiment_name,
+        timestamp
+    )
+    
+    # Print results
+    print("="*50)
+    print("EXPERIMENT RESULTS")
+    print("="*50)
+    print(f"Retriever: {retriever_type}")
+    print(f"k: {k}")
+    print(f"Dataset: {dataset}")
+    print(f"QA pairs: {len(qa_pairs)}")
+    print(f"Exact Match: {squad_metrics['exact_match']:.4f}")
+    print(f"F1 Score: {squad_metrics['f1']:.4f}")
+    print(f"Recall@{k}: {retrieval_metrics.get(f'recall@{k}', 0):.4f}")
+    print(f"MRR@{k}: {retrieval_metrics.get(f'mrr@{k}', 0):.4f}")
+    print(f"Avg Retrieval Time: {performance_metrics['avg_retrieval_time']:.4f}s")
+    print(f"Avg Generation Time: {performance_metrics['avg_generation_time']:.4f}s")
+    print("="*50)
+    
+    return all_metrics, results
+
+
 def run_sweep(config: Config, retrievers: List[str], k_values: List[int], 
               dataset: str = "squad", max_samples: Optional[int] = None):
     """Run experiments across multiple retrievers and k values."""
     print(f"Running sweep: {retrievers} retrievers, k={k_values}")
     
+    # Load dataset once and select consistent samples for all experiments
+    print("Loading dataset and selecting consistent samples for all experiments...")
+    set_seed(config.seed)  # Ensure deterministic sample selection
+    
+    dataset_loader = SquadDataset(config.dataset)
+    dataset_loader.load()
+    
+    # Get the same QA pairs that will be used for all experiments
+    all_qa_pairs = dataset_loader.get_qa_pairs()
+    if max_samples:
+        selected_qa_pairs = all_qa_pairs[:max_samples]
+    else:
+        selected_qa_pairs = all_qa_pairs
+    
+    print(f"Selected {len(selected_qa_pairs)} QA pairs for consistent evaluation across all retrievers")
+    
     # Set up results storage
     sweep_results = []
     
-    # Run experiments
+    # Run experiments with the same QA pairs
     for retriever_type in retrievers:
         for k in k_values:
             print(f"\n{'='*60}")
@@ -290,7 +541,9 @@ def run_sweep(config: Config, retrievers: List[str], k_values: List[int],
             print(f"{'='*60}")
             
             try:
-                metrics, _ = run_experiment(config, dataset, retriever_type, k, max_samples)
+                # Run experiment with pre-selected QA pairs
+                metrics, _ = run_experiment_with_qa_pairs(config, dataset, retriever_type, k, 
+                                                        dataset_loader, selected_qa_pairs)
                 
                 # Store result
                 sweep_results.append({
