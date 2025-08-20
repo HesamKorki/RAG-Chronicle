@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-lab"
+version = "0.1.0"
+description = "A comprehensive RAG experiment framework for comparing retrieval methods"
+authors = [{name = "Hesam Korki"}]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0.0",
+    "transformers>=4.37.0",
+    "accelerate>=0.20.0",
+    "datasets>=2.14.0",
+    "evaluate>=0.4.0",
+    "scikit-learn>=1.3.0",
+    "rank-bm25>=0.2.2",
+    "faiss-cpu>=1.7.4",
+    "sentence-transformers>=2.2.2",
+    "tqdm>=4.65.0",
+    "matplotlib>=3.7.0",
+    "pydantic>=2.0.0",
+    "hydra-core>=1.3.0",
+    "omegaconf>=2.3.0",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "seaborn>=0.12.0",
+    "tyro>=0.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "flake8>=6.0.0",
+    "mypy>=1.5.0",
+    "jupyter>=1.0.0",
+    "ipykernel>=6.25.0",
+]
+
+[project.scripts]
+rag-lab = "rag_lab.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.black]
+line-length = 88
+target-version = ['py310']
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
