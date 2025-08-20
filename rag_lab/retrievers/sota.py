@@ -15,7 +15,7 @@ class SOTARetriever(DenseRetriever):
     def __init__(self, model_name: str = "BAAI/bge-small-en-v1.5", 
                  normalize_embeddings: bool = True, faiss_index_type: str = "IndexFlatIP",
                  batch_size: int = 32, k_rerank: int = 50,
-                 cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-12-v-2",
+                 cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
                  rerank_batch_size: int = 16):
         """Initialize the SOTA retriever."""
         super().__init__(model_name, normalize_embeddings, faiss_index_type, batch_size)

@@ -29,7 +29,7 @@ class DenseRetriever(BaseRetriever):
         self.model.max_seq_length = 512  # Set reasonable max length
         
         # FAISS index
-        self.index = None
+        self.faiss_index = None
         self.embeddings = None
         self.dimension = None
     
@@ -55,17 +55,17 @@ class DenseRetriever(BaseRetriever):
         # Create FAISS index
         print(f"Creating FAISS index: {self.faiss_index_type}")
         if self.faiss_index_type == "IndexFlatIP":
-            self.index = faiss.IndexFlatIP(self.dimension)
+            self.faiss_index = faiss.IndexFlatIP(self.dimension)
         elif self.faiss_index_type == "IndexFlatL2":
-            self.index = faiss.IndexFlatL2(self.dimension)
+            self.faiss_index = faiss.IndexFlatL2(self.dimension)
         else:
             raise ValueError(f"Unsupported FAISS index type: {self.faiss_index_type}")
         
         # Add vectors to index
-        self.index.add(self.embeddings.astype('float32'))
+        self.faiss_index.add(self.embeddings.astype('float32'))
         
         self.indexed = True
-        print(f"Built dense index with {self.index.ntotal} vectors")
+        print(f"Built dense index with {self.faiss_index.ntotal} vectors")
     
     def retrieve(self, query: str, k: int) -> List[Tuple[int, float]]:
         """Retrieve documents using dense similarity."""
@@ -79,7 +79,7 @@ class DenseRetriever(BaseRetriever):
         )
         
         # Search in FAISS index
-        scores, indices = self.index.search(query_embedding.astype('float32'), k)
+        scores, indices = self.faiss_index.search(query_embedding.astype('float32'), k)
         
         # Return (doc_id, score) pairs
         results = []
@@ -94,7 +94,7 @@ class DenseRetriever(BaseRetriever):
         path.mkdir(parents=True, exist_ok=True)
         
         # Save FAISS index
-        faiss.write_index(self.index, str(path / "faiss_index.bin"))
+        faiss.write_index(self.faiss_index, str(path / "faiss_index.bin"))
         
         # Save embeddings
         save_numpy(self.embeddings, path / "embeddings.npy")
@@ -119,7 +119,7 @@ class DenseRetriever(BaseRetriever):
         if not index_file.exists():
             raise FileNotFoundError(f"FAISS index file not found: {index_file}")
         
-        self.index = faiss.read_index(str(index_file))
+        self.faiss_index = faiss.read_index(str(index_file))
         
         # Load embeddings
         embeddings_file = path / "embeddings.npy"
@@ -186,7 +186,7 @@ class DenseRetriever(BaseRetriever):
             'model_name': self.model_name,
             'faiss_index_type': self.faiss_index_type,
             'normalize_embeddings': self.normalize_embeddings,
-            'index_size': self.index.ntotal,
+            'index_size': self.faiss_index.ntotal,
             'embeddings_shape': self.embeddings.shape
         }
     

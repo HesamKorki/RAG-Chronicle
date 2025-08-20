@@ -89,7 +89,7 @@ class SOTARetrieverConfig(DenseRetrieverConfig):
     """Configuration for SOTA retrieval (dense + reranking)."""
     
     k_rerank: int = Field(default=50, ge=10, le=200)
-    cross_encoder_model: str = Field(default="cross-encoder/ms-marco-MiniLM-L-12-v-2")
+    cross_encoder_model: str = Field(default="cross-encoder/ms-marco-MiniLM-L-6-v2")
     rerank_batch_size: int = Field(default=16, ge=1, le=64)
 
 
@@ -152,7 +152,7 @@ class Config(BaseModel):
     # Reproducibility
     seed: int = Field(default=42)
     
-    def get_retriever_config(self, retriever_type: str) -> RetrieverConfig:
+    def get_retriever_config(self, retriever_type: str):
         """Get configuration for a specific retriever type."""
         config_map = {
             "boolean": self.boolean,
@@ -161,7 +161,9 @@ class Config(BaseModel):
             "dense": self.dense,
             "sota": self.sota,
         }
-        return config_map.get(retriever_type, RetrieverConfig())
+        if retriever_type not in config_map:
+            raise ValueError(f"Unknown retriever type: {retriever_type}")
+        return config_map[retriever_type]
     
     def setup_directories(self) -> None:
         """Create necessary directories."""

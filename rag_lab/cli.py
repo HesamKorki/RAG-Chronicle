@@ -39,6 +39,8 @@ def get_retriever(retriever_type: str, config: Config):
     retriever_class = retriever_map[retriever_type]
     retriever_config = config.get_retriever_config(retriever_type)
     
+
+    
     # Initialize with config parameters
     if retriever_type == "boolean":
         return retriever_class(
