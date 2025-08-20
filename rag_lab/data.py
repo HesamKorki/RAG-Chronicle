@@ -168,10 +168,18 @@ class SquadDataset:
         return chunks
     
     def get_corpus(self) -> List[str]:
-        """Get the corpus as a list of text chunks."""
+        """Get the corpus as a list of unique document texts."""
+        # Use document texts instead of chunks to avoid duplicates
+        # Each document represents a unique paragraph from SQuAD
         corpus = []
+        seen_texts = set()
+        
         for doc in self.documents:
-            corpus.extend(doc.chunks)
+            # Use the main document text, not chunks
+            if doc.text not in seen_texts:
+                corpus.append(doc.text)
+                seen_texts.add(doc.text)
+        
         return corpus
     
     def get_qa_pairs(self) -> List[QAPair]:
