@@ -1,8 +1,11 @@
 """Qwen generator implementation for RAG experiments."""
 
+import os
 import torch
+import logging
 from typing import List, Optional, Dict, Any
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers.utils import logging as transformers_logging
 
 from .prompts import create_chat_messages, truncate_passages_for_context
 from ..config import GeneratorConfig
@@ -88,118 +91,121 @@ class QwenGenerator:
         """Generate answer using retrieved passages or general knowledge."""
         # No early return - we can answer with or without passages
         
-        with Timer("Generation") as timer:
-            # Clear MPS cache if using MPS
-            if self.device == "mps" and torch.backends.mps.is_available():
+        # Suppress transformers warnings about generation parameters
+        original_level = transformers_logging.get_verbosity()
+        transformers_logging.set_verbosity_error()
+        
+        try:
+            with Timer("Generation") as timer:
+                # Clear MPS cache if using MPS
+                if self.device == "mps" and torch.backends.mps.is_available():
+                    try:
+                        torch.mps.empty_cache()
+                    except Exception:
+                        pass  # Ignore cache clearing errors
+                
+                # Truncate passages to fit context window
+                selected_passages, selected_doc_ids = truncate_passages_for_context(
+                    passages, doc_ids, self.config.context_token_budget
+                )
+                
+                # Create chat messages
+                messages = create_chat_messages(question, selected_passages, selected_doc_ids)
+                
+                # Apply chat template
+                text = self.tokenizer.apply_chat_template(
+                    messages, 
+                    tokenize=False, 
+                    add_generation_prompt=True
+                )
+                
+                # Tokenize input with attention mask
+                inputs = self.tokenizer([text], return_tensors="pt", padding=True)
+                
+                # Move inputs to appropriate device
                 try:
-                    torch.mps.empty_cache()
-                except Exception:
-                    pass  # Ignore cache clearing errors
-            
-            # Truncate passages to fit context window
-            selected_passages, selected_doc_ids = truncate_passages_for_context(
-                passages, doc_ids, self.config.context_token_budget
-            )
-            
-            # Create chat messages
-            messages = create_chat_messages(question, selected_passages, selected_doc_ids)
-            
-            # Apply chat template
-            text = self.tokenizer.apply_chat_template(
-                messages, 
-                tokenize=False, 
-                add_generation_prompt=True
-            )
-            
-            # Tokenize input with attention mask
-            inputs = self.tokenizer([text], return_tensors="pt", padding=True)
-            
-            # Move inputs to appropriate device
-            try:
-                if hasattr(self.model, 'device') and hasattr(next(self.model.parameters()), 'device'):
-                    # If using device_map, move inputs to model's device
-                    model_device = next(self.model.parameters()).device
-                    inputs = {k: v.to(model_device) for k, v in inputs.items()}
-                elif self.device not in ["auto"]:
-                    inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            except Exception as e:
-                print(f"Warning: Could not move inputs to device: {e}")
-                # Keep inputs on CPU as fallback
-            
-            # Generate
-            generation_kwargs = {
-                "max_new_tokens": self.config.max_new_tokens,
-                "pad_token_id": self.tokenizer.eos_token_id,
-                "eos_token_id": self.tokenizer.eos_token_id,
-            }
-            
-            # Only add sampling parameters if temperature > 0
-            if self.config.temperature > 0:
-                generation_kwargs.update({
-                    "do_sample": True,
-                    "temperature": self.config.temperature,
-                    "top_p": self.config.top_p,
-                })
-            else:
-                generation_kwargs["do_sample"] = False
-            
-            # Try generation with error handling for MPS
-            try:
-                with torch.no_grad():
-                    outputs = self.model.generate(**inputs, **generation_kwargs)
-            except Exception as e:
-                if "MPSTemporaryNDArray" in str(e) or "total bytes of NDArray > 2**32" in str(e):
-                    print(f"MPS generation failed due to memory: {e}")
-                    print("Moving model to CPU for generation...")
-                    
-                    # Move model to CPU
-                    self.model = self.model.cpu()
-                    self.device = "cpu"
-                    
-                    # Move inputs to CPU
-                    inputs = {k: v.cpu() for k, v in inputs.items()}
-                    
-                    # Try generation on CPU
+                    if hasattr(self.model, 'device') and hasattr(next(self.model.parameters()), 'device'):
+                        # If using device_map, move inputs to model's device
+                        model_device = next(self.model.parameters()).device
+                        inputs = {k: v.to(model_device) for k, v in inputs.items()}
+                    elif self.device not in ["auto"]:
+                        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                except Exception as e:
+                    print(f"Warning: Could not move inputs to device: {e}")
+                    # Keep inputs on CPU as fallback
+                
+                # Generate with minimal, safe parameters - only use what's absolutely necessary
+                generation_kwargs = {
+                    "max_new_tokens": self.config.max_new_tokens,
+                    "do_sample": False,  # Always use greedy decoding to avoid parameter issues
+                    "pad_token_id": self.tokenizer.eos_token_id,
+                }
+                
+                # Only add eos_token_id if it exists and is different from pad_token_id
+                if hasattr(self.tokenizer, 'eos_token_id') and self.tokenizer.eos_token_id is not None:
+                    if self.tokenizer.eos_token_id != self.tokenizer.pad_token_id:
+                        generation_kwargs["eos_token_id"] = self.tokenizer.eos_token_id
+                
+                # Try generation with error handling for MPS
+                try:
                     with torch.no_grad():
                         outputs = self.model.generate(**inputs, **generation_kwargs)
-                    
-                    print("Generation successful on CPU")
+                except Exception as e:
+                    if "MPSTemporaryNDArray" in str(e) or "total bytes of NDArray > 2**32" in str(e):
+                        print(f"MPS generation failed due to memory: {e}")
+                        print("Moving model to CPU for generation...")
+                        
+                        # Move model to CPU
+                        self.model = self.model.cpu()
+                        self.device = "cpu"
+                        
+                        # Move inputs to CPU
+                        inputs = {k: v.cpu() for k, v in inputs.items()}
+                        
+                        # Try generation on CPU
+                        with torch.no_grad():
+                            outputs = self.model.generate(**inputs, **generation_kwargs)
+                        
+                        print("Generation successful on CPU")
+                    else:
+                        raise e
+                
+                # Decode output
+                generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                
+                # Extract only the generated part
+                input_length = inputs["input_ids"].shape[1]
+                
+                if len(outputs[0]) > input_length:
+                    generated_part = self.tokenizer.decode(
+                        outputs[0][input_length:], 
+                        skip_special_tokens=True
+                    ).strip()
                 else:
-                    raise e
-            
-            # Decode output
-            generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            
-            # Extract only the generated part
-            input_length = inputs["input_ids"].shape[1]
-            
-            if len(outputs[0]) > input_length:
-                generated_part = self.tokenizer.decode(
-                    outputs[0][input_length:], 
-                    skip_special_tokens=True
-                ).strip()
-            else:
-                generated_part = ""
-            
-            # Count tokens
-            tokens_generated = len(outputs[0]) - input_length
-            
-            # Clear MPS cache after generation
-            if self.device == "mps" and torch.backends.mps.is_available():
-                try:
-                    torch.mps.empty_cache()
-                except Exception:
-                    pass  # Ignore cache clearing errors
+                    generated_part = ""
+                
+                # Count tokens
+                tokens_generated = len(outputs[0]) - input_length
+                
+                # Clear MPS cache after generation
+                if self.device == "mps" and torch.backends.mps.is_available():
+                    try:
+                        torch.mps.empty_cache()
+                    except Exception:
+                        pass  # Ignore cache clearing errors
         
-        return {
-            "answer": generated_part,
-            "passages_used": selected_passages,
-            "doc_ids_used": selected_doc_ids,
-            "generation_time": timer.elapsed_time,
-            "tokens_generated": tokens_generated,
-            "full_prompt": text,
-            "full_response": generated_text
-        }
+            return {
+                "answer": generated_part,
+                "passages_used": selected_passages,
+                "doc_ids_used": selected_doc_ids,
+                "generation_time": timer.elapsed_time,
+                "tokens_generated": tokens_generated,
+                "full_prompt": text,
+                "full_response": generated_text
+            }
+        finally:
+            # Restore original verbosity level
+            transformers_logging.set_verbosity(original_level)
     
     def generate_batch(self, questions: List[str], passages_list: List[List[str]], 
                       doc_ids_list: Optional[List[List[int]]] = None,

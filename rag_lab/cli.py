@@ -127,21 +127,25 @@ def run_experiment(config: Config, dataset: str, retriever_type: str, k: int = 5
     
     print(f"Evaluating on {len(qa_pairs)} QA pairs")
     
-    # Get corpus
+    # Get corpus and retriever
     corpus = dataset_loader.get_corpus()
     
-    # Get retriever
-    retriever = get_retriever(retriever_type, config)
-    
-    # Load or build index
-    index_path = config.output.get_index_dir(dataset, retriever_type)
-    if index_path.exists():
-        print(f"Loading existing index from {index_path}")
-        retriever.load_index(index_path)
+    if retriever_type == "none":
+        print("Running in direct generation mode (no retrieval)")
+        retriever = None
     else:
-        print(f"Building new index at {index_path}")
-        retriever.index(corpus)
-        retriever.save_index(index_path)
+        # Get retriever
+        retriever = get_retriever(retriever_type, config)
+        
+        # Load or build index
+        index_path = config.output.get_index_dir(dataset, retriever_type)
+        if index_path.exists():
+            print(f"Loading existing index from {index_path}")
+            retriever.load_index(index_path)
+        else:
+            print(f"Building new index at {index_path}")
+            retriever.index(corpus)
+            retriever.save_index(index_path)
     
     # Initialize generator
     generator = QwenGenerator(config.generator)
@@ -158,18 +162,25 @@ def run_experiment(config: Config, dataset: str, retriever_type: str, k: int = 5
         if i % 100 == 0:
             print(f"Processing QA pair {i+1}/{len(qa_pairs)}")
         
-        # Retrieve documents
-        with Timer("Retrieval") as timer:
-            retrieved_docs = retriever.retrieve(qa_pair.question, k)
-        retrieval_times.append(timer.elapsed_time)
-        
-        # Get passages
-        passages = []
-        doc_ids = []
-        for doc_id, score in retrieved_docs:
-            if doc_id < len(corpus):
-                passages.append(corpus[doc_id])
-                doc_ids.append(doc_id)
+        # Retrieve documents (if retriever exists)
+        if retriever is not None:
+            with Timer("Retrieval") as timer:
+                retrieved_docs = retriever.retrieve(qa_pair.question, k)
+            retrieval_times.append(timer.elapsed_time)
+            
+            # Get passages
+            passages = []
+            doc_ids = []
+            for doc_id, score in retrieved_docs:
+                if doc_id < len(corpus):
+                    passages.append(corpus[doc_id])
+                    doc_ids.append(doc_id)
+        else:
+            # No retrieval - direct generation
+            retrieval_times.append(0.0)  # No retrieval time
+            passages = []
+            doc_ids = []
+            retrieved_docs = []
         
         # Generate answer
         with Timer("Generation") as timer:
@@ -205,11 +216,15 @@ def run_experiment(config: Config, dataset: str, retriever_type: str, k: int = 5
     # SQuAD metrics
     squad_metrics = evaluate_squad_batch(results, qa_pairs)
     
-    # Retrieval metrics (simplified - using document overlap as relevance)
-    retrieved_docs_list = [result["retrieved_docs"] for result in results]
-    # For now, assume all documents are equally relevant (simplified)
-    relevant_docs_list = [set(range(len(corpus))) for _ in results]
-    retrieval_metrics = evaluate_retrieval_batch(retrieved_docs_list, relevant_docs_list, [k])
+    # Retrieval metrics (only if retriever was used)
+    if retriever is not None:
+        retrieved_docs_list = [result["retrieved_docs"] for result in results]
+        # For now, assume all documents are equally relevant (simplified)
+        relevant_docs_list = [set(range(len(corpus))) for _ in results]
+        retrieval_metrics = evaluate_retrieval_batch(retrieved_docs_list, relevant_docs_list, [k])
+    else:
+        # No retrieval metrics for direct generation
+        retrieval_metrics = {}
     
     # Performance metrics
     performance_metrics = {
@@ -340,7 +355,7 @@ def main():
     # Sweep command
     sweep_parser = subparsers.add_parser("sweep", help="Run experiment sweep")
     sweep_parser.add_argument("--retrievers", nargs="+", 
-                             choices=["boolean", "tfidf", "bm25", "dense", "sota"],
+                             choices=["none", "boolean", "tfidf", "bm25", "dense", "sota"],
                              default=["boolean", "tfidf", "bm25", "dense", "sota"],
                              help="Retriever types to test")
     sweep_parser.add_argument("--k", nargs="+", type=int, default=[1, 3, 5, 10],
@@ -363,9 +378,6 @@ def main():
         build_index(config, args.dataset, args.retriever)
     
     elif args.command == "run":
-        if args.retriever == "none":
-            print("No retrieval mode not yet implemented")
-            return
         run_experiment(config, args.dataset, args.retriever, args.k, args.max_samples)
     
     elif args.command == "sweep":
