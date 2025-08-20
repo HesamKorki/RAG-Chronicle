@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Dict
 
 import tyro
+from tqdm import tqdm
 
 from .config import Config
 from .data import SquadDataset
@@ -232,9 +233,12 @@ def run_experiment(config: Config, dataset: str, retriever_type: str, k: int = 5
     retrieval_times = []
     generation_times = []
     
-    for i, qa_pair in enumerate(qa_pairs):
-        if i % 100 == 0:
-            print(f"Processing QA pair {i+1}/{len(qa_pairs)}")
+    # Create progress bar
+    progress_bar = tqdm(qa_pairs, desc=f"🔍 {retriever_type.upper()} Retrieval + 🤖 Generation", 
+                       unit="QA", ncols=120, 
+                       bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}")
+    
+    for i, qa_pair in enumerate(progress_bar):
         
         # Retrieve documents (if retriever exists)
         if retriever is not None:
@@ -261,12 +265,20 @@ def run_experiment(config: Config, dataset: str, retriever_type: str, k: int = 5
             generation_result = generator.generate(qa_pair.question, passages, doc_ids, k)
         generation_times.append(timer.elapsed_time)
         
+        # Find ground truth document ID and text
+        ground_truth_doc_id = dataset_loader.find_ground_truth_doc_id(qa_pair)
+        ground_truth_doc_text = None
+        if ground_truth_doc_id is not None and ground_truth_doc_id < len(dataset_loader.documents):
+            ground_truth_doc_text = dataset_loader.documents[ground_truth_doc_id].text
+        
         # Store result
         result = {
             "qa_id": qa_pair.id,
             "question": qa_pair.question,
             "ground_truth": qa_pair.answer,
             "ground_truth_answers": qa_pair.answers,
+            "ground_truth_doc_id": ground_truth_doc_id,
+            "ground_truth_doc_text": ground_truth_doc_text,
             "answer": generation_result["answer"],  # Changed from predicted_answer to match evaluation expectation
             "predicted_answer": generation_result["answer"],
             "retrieved_docs": doc_ids,
@@ -279,6 +291,17 @@ def run_experiment(config: Config, dataset: str, retriever_type: str, k: int = 5
         }
         
         results.append(result)
+        
+        # Update progress bar with current stats
+        avg_retrieval = sum(retrieval_times) / len(retrieval_times) if retrieval_times else 0
+        avg_generation = sum(generation_times) / len(generation_times) if generation_times else 0
+        
+        progress_bar.set_postfix({
+            "Ret": f"{retrieval_times[-1]:.3f}s",
+            "Gen": f"{generation_times[-1]:.3f}s", 
+            "AvgRet": f"{avg_retrieval:.3f}s",
+            "AvgGen": f"{avg_generation:.3f}s"
+        })
         
         # Track performance
         perf_tracker.add_metric("retrieval_time", retrieval_times[-1])
@@ -293,8 +316,13 @@ def run_experiment(config: Config, dataset: str, retriever_type: str, k: int = 5
     # Retrieval metrics (only if retriever was used)
     if retriever is not None:
         retrieved_docs_list = [result["retrieved_docs"] for result in results]
-        # For now, assume all documents are equally relevant (simplified)
-        relevant_docs_list = [set(range(len(corpus))) for _ in results]
+        # Use actual ground truth documents as relevant documents
+        relevant_docs_list = []
+        for result in results:
+            if result["ground_truth_doc_id"] is not None:
+                relevant_docs_list.append({result["ground_truth_doc_id"]})
+            else:
+                relevant_docs_list.append(set())  # No relevant docs if ground truth not found
         retrieval_metrics = evaluate_retrieval_batch(retrieved_docs_list, relevant_docs_list, [k])
     else:
         # No retrieval metrics for direct generation
@@ -352,7 +380,7 @@ def run_experiment(config: Config, dataset: str, retriever_type: str, k: int = 5
 
 
 def run_experiment_with_qa_pairs(config: Config, dataset: str, retriever_type: str, k: int,
-                                dataset_loader: SquadDataset, qa_pairs: List) -> Tuple[Dict, List]:
+                                dataset_loader: SquadDataset, qa_pairs: List, max_samples: Optional[int] = None) -> Tuple[Dict, List]:
     """Run a single RAG experiment with pre-selected QA pairs."""
     print(f"Running experiment: {retriever_type} retriever, k={k}")
     print(f"Evaluating on {len(qa_pairs)} QA pairs (pre-selected for consistency)")
@@ -391,9 +419,12 @@ def run_experiment_with_qa_pairs(config: Config, dataset: str, retriever_type: s
     retrieval_times = []
     generation_times = []
     
-    for i, qa_pair in enumerate(qa_pairs):
-        if i % 100 == 0:
-            print(f"Processing QA pair {i+1}/{len(qa_pairs)}")
+    # Create progress bar
+    progress_bar = tqdm(qa_pairs, desc=f"🔍 {retriever_type.upper()} Retrieval + 🤖 Generation", 
+                       unit="QA", ncols=120, 
+                       bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}")
+    
+    for i, qa_pair in enumerate(progress_bar):
         
         # Retrieve documents (if retriever exists)
         if retriever is not None:
@@ -420,12 +451,20 @@ def run_experiment_with_qa_pairs(config: Config, dataset: str, retriever_type: s
             generation_result = generator.generate(qa_pair.question, passages, doc_ids, k)
         generation_times.append(timer.elapsed_time)
         
+        # Find ground truth document ID and text
+        ground_truth_doc_id = dataset_loader.find_ground_truth_doc_id(qa_pair)
+        ground_truth_doc_text = None
+        if ground_truth_doc_id is not None and ground_truth_doc_id < len(dataset_loader.documents):
+            ground_truth_doc_text = dataset_loader.documents[ground_truth_doc_id].text
+        
         # Store result
         result = {
             "qa_id": qa_pair.id,
             "question": qa_pair.question,
             "ground_truth": qa_pair.answer,
             "ground_truth_answers": qa_pair.answers,
+            "ground_truth_doc_id": ground_truth_doc_id,
+            "ground_truth_doc_text": ground_truth_doc_text,
             "answer": generation_result["answer"],
             "predicted_answer": generation_result["answer"],
             "retrieved_docs": doc_ids,
@@ -437,6 +476,17 @@ def run_experiment_with_qa_pairs(config: Config, dataset: str, retriever_type: s
             "is_impossible": qa_pair.is_impossible
         }
         results.append(result)
+        
+        # Update progress bar with current stats
+        avg_retrieval = sum(retrieval_times) / len(retrieval_times) if retrieval_times else 0
+        avg_generation = sum(generation_times) / len(generation_times) if generation_times else 0
+        
+        progress_bar.set_postfix({
+            "Ret": f"{retrieval_times[-1]:.3f}s",
+            "Gen": f"{generation_times[-1]:.3f}s", 
+            "AvgRet": f"{avg_retrieval:.3f}s",
+            "AvgGen": f"{avg_generation:.3f}s"
+        })
         
         # Track performance
         perf_tracker.add_metric("retrieval_time", retrieval_times[-1])
@@ -451,8 +501,13 @@ def run_experiment_with_qa_pairs(config: Config, dataset: str, retriever_type: s
     # Retrieval metrics (only if retriever was used)
     if retriever is not None:
         retrieved_docs_list = [result["retrieved_docs"] for result in results]
-        # For now, assume all documents are equally relevant (simplified)
-        relevant_docs_list = [set(range(len(corpus))) for _ in results]
+        # Use actual ground truth documents as relevant documents
+        relevant_docs_list = []
+        for result in results:
+            if result["ground_truth_doc_id"] is not None:
+                relevant_docs_list.append({result["ground_truth_doc_id"]})
+            else:
+                relevant_docs_list.append(set())  # No relevant docs if ground truth not found
         retrieval_metrics = evaluate_retrieval_batch(retrieved_docs_list, relevant_docs_list, [k])
     else:
         # No retrieval metrics for direct generation
@@ -533,17 +588,23 @@ def run_sweep(config: Config, retrievers: List[str], k_values: List[int],
     # Set up results storage
     sweep_results = []
     
+    # Calculate total experiments for progress tracking
+    total_experiments = len(retrievers) * len(k_values)
+    experiment_count = 0
+    
     # Run experiments with the same QA pairs
     for retriever_type in retrievers:
         for k in k_values:
-            print(f"\n{'='*60}")
-            print(f"Running: {retriever_type} retriever, k={k}")
-            print(f"{'='*60}")
+            experiment_count += 1
+            print(f"\n{'='*70}")
+            print(f"🧪 EXPERIMENT {experiment_count}/{total_experiments}: {retriever_type.upper()} retriever, k={k}")
+            print(f"📊 Progress: {experiment_count/total_experiments*100:.1f}% complete")
+            print(f"{'='*70}")
             
             try:
                 # Run experiment with pre-selected QA pairs
                 metrics, _ = run_experiment_with_qa_pairs(config, dataset, retriever_type, k, 
-                                                        dataset_loader, selected_qa_pairs)
+                                                        dataset_loader, selected_qa_pairs, max_samples)
                 
                 # Store result
                 sweep_results.append({
@@ -557,6 +618,9 @@ def run_sweep(config: Config, retrievers: List[str], k_values: List[int],
                     "avg_retrieval_time": metrics["avg_retrieval_time"],
                     "avg_generation_time": metrics["avg_generation_time"]
                 })
+                
+                # Show completion status
+                print(f"✅ COMPLETED: {retriever_type} k={k} | EM: {metrics['exact_match']:.3f} | F1: {metrics['f1']:.3f} | Ret: {metrics['avg_retrieval_time']:.3f}s | Gen: {metrics['avg_generation_time']:.3f}s")
                 
             except Exception as e:
                 print(f"Error running {retriever_type} with k={k}: {e}")
@@ -609,9 +673,9 @@ def main():
     sweep_parser = subparsers.add_parser("sweep", help="Run experiment sweep")
     sweep_parser.add_argument("--retrievers", nargs="+", 
                              choices=["none", "boolean", "tfidf", "bm25", "dense", "sota"],
-                             default=["boolean", "tfidf", "bm25", "dense", "sota"],
+                             default=["none", "boolean", "tfidf", "bm25", "dense", "sota"],
                              help="Retriever types to test")
-    sweep_parser.add_argument("--k", nargs="+", type=int, default=[1, 3, 5, 10],
+    sweep_parser.add_argument("--k", nargs="+", type=int, default=[3],
                              help="k values to test")
     sweep_parser.add_argument("--dataset", default="squad", help="Dataset name")
     sweep_parser.add_argument("--max-samples", type=int, help="Maximum number of QA pairs to evaluate")

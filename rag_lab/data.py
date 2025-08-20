@@ -186,6 +186,15 @@ class SquadDataset:
         """Get all QA pairs."""
         return self.qa_pairs
     
+    def find_ground_truth_doc_id(self, qa_pair: QAPair) -> Optional[int]:
+        """Find the document ID that contains the ground truth answer for a QA pair."""
+        # Since each document corresponds to a paragraph and each QA pair has the context,
+        # we can find the matching document by comparing the context with document text
+        for doc_idx, document in enumerate(self.documents):
+            if document.text.strip() == qa_pair.context.strip():
+                return doc_idx
+        return None
+    
     def get_documents(self) -> List[Document]:
         """Get all documents."""
         return self.documents
