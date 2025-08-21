@@ -58,6 +58,7 @@ class BooleanRetrieverConfig(RetrieverConfig):
     
     normalize_tokens: bool = Field(default=True)
     case_sensitive: bool = Field(default=False)
+    min_term_threshold: int = Field(default=3, ge=1, le=10)
 
 
 class TfidfRetrieverConfig(RetrieverConfig):

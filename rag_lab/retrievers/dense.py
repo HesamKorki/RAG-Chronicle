@@ -165,7 +165,7 @@ class DenseRetriever(BaseRetriever):
         doc_embedding = self.embeddings[doc_id:doc_id+1].astype('float32')
         
         # Search in FAISS index
-        scores, indices = self.index.search(doc_embedding, k + 1)  # +1 to exclude self
+        scores, indices = self.faiss_index.search(doc_embedding, k + 1)  # +1 to exclude self
         
         # Return results (excluding self)
         results = []

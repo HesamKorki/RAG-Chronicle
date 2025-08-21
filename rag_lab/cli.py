@@ -123,7 +123,8 @@ def get_retriever(retriever_type: str, config: Config):
     if retriever_type == "boolean":
         return retriever_class(
             normalize_tokens=retriever_config.normalize_tokens,
-            case_sensitive=retriever_config.case_sensitive
+            case_sensitive=retriever_config.case_sensitive,
+            min_term_threshold=retriever_config.min_term_threshold
         )
     elif retriever_type == "tfidf":
         return retriever_class(

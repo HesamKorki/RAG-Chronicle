@@ -13,11 +13,12 @@ from ..utils.text import clean_text_for_boolean, tokenize_text
 class BooleanRetriever(BaseRetriever):
     """Boolean retriever with AND/OR/NOT operations."""
     
-    def __init__(self, normalize_tokens: bool = True, case_sensitive: bool = False):
+    def __init__(self, normalize_tokens: bool = True, case_sensitive: bool = False, min_term_threshold: int = 3):
         """Initialize the boolean retriever."""
         super().__init__("Boolean")
         self.normalize_tokens = normalize_tokens
         self.case_sensitive = case_sensitive
+        self.min_term_threshold = min_term_threshold  # Minimum non-stopword terms required
         self.inverted_index: Dict[str, Set[int]] = defaultdict(set)
         self.corpus: List[str] = []
     
@@ -55,10 +56,11 @@ class BooleanRetriever(BaseRetriever):
         # Parse boolean query
         doc_ids = self._evaluate_boolean_query(query)
         
-        # Convert to list of tuples with dummy scores
+        # TRUE Boolean retrieval: Binary relevance only (1.0 or 0.0)
+        # All matching documents get equal score - no ranking by relevance
         results = [(doc_id, 1.0) for doc_id in doc_ids]
         
-        # Limit to k results
+        # Return first k results (no meaningful ranking in pure Boolean)
         return results[:k]
     
     def _evaluate_boolean_query(self, query: str) -> Set[int]:
@@ -105,34 +107,72 @@ class BooleanRetriever(BaseRetriever):
         return self._get_docs_for_term(expression)
     
     def _get_docs_for_term(self, term: str) -> Set[int]:
-        """Get document IDs for a single term."""
+        """Get document IDs for a single term or natural language query."""
         if not self.case_sensitive:
             term = term.lower()
         
         # Clean term if needed
         if self.normalize_tokens:
             term = clean_text_for_boolean(term)
-            # Extract tokens and get intersection
+            # Extract tokens
             tokens = tokenize_text(term, normalize=False)
             if not tokens:
                 return set()
             
-            result = self.inverted_index.get(tokens[0], set())
-            for token in tokens[1:]:
-                result = result.intersection(self.inverted_index.get(token, set()))
-            return result
+            # Filter out common stopwords for better natural language handling
+            stopwords = {'what', 'who', 'where', 'when', 'why', 'how', 'the', 'a', 'an', 
+                        'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with',
+                        'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had',
+                        'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might'}
+            
+            meaningful_tokens = [token for token in tokens if token.lower() not in stopwords]
+            
+            # If no meaningful tokens, fall back to all tokens
+            if not meaningful_tokens:
+                meaningful_tokens = tokens
+            
+            # Apply threshold: only return documents that contain at least min_term_threshold meaningful terms
+            if len(meaningful_tokens) >= self.min_term_threshold:
+                candidate_docs = set()
+                for token in meaningful_tokens:
+                    candidate_docs = candidate_docs.union(self.inverted_index.get(token, set()))
+                
+                # Filter documents that meet the threshold
+                result = set()
+                for doc_id in candidate_docs:
+                    doc_text = self.corpus[doc_id].lower() if not self.case_sensitive else self.corpus[doc_id]
+                    doc_tokens = set(tokenize_text(doc_text, normalize=False))
+                    doc_tokens = {token.lower() for token in doc_tokens}
+                    
+                    # Count how many meaningful query terms appear in this document
+                    matching_terms = sum(1 for token in meaningful_tokens if token.lower() in doc_tokens)
+                    
+                    # Only include if it meets the threshold
+                    if matching_terms >= self.min_term_threshold:
+                        result.add(doc_id)
+                
+                return result
+            else:
+                # If query has fewer than threshold terms, use OR logic without threshold
+                result = set()
+                for token in meaningful_tokens:
+                    result = result.union(self.inverted_index.get(token, set()))
+                return result
         else:
             return self.inverted_index.get(term, set())
     
+
     def save_index(self, path: Path) -> None:
         """Save index to disk."""
         path.mkdir(parents=True, exist_ok=True)
         
         index_data = {
             'inverted_index': dict(self.inverted_index),
+            'corpus': self.corpus,
             'corpus_size': self.corpus_size,
             'normalize_tokens': self.normalize_tokens,
-            'case_sensitive': self.case_sensitive
+            'case_sensitive': self.case_sensitive,
+            'min_term_threshold': self.min_term_threshold
         }
         
         save_pickle(index_data, path / "boolean_index.pkl")
@@ -147,9 +187,11 @@ class BooleanRetriever(BaseRetriever):
         index_data = load_pickle(index_file)
         
         self.inverted_index = defaultdict(set, index_data['inverted_index'])
+        self.corpus = index_data['corpus']
         self.corpus_size = index_data['corpus_size']
         self.normalize_tokens = index_data['normalize_tokens']
         self.case_sensitive = index_data['case_sensitive']
+        self.min_term_threshold = index_data.get('min_term_threshold', 3)  # Default to 3 for backward compatibility
         self.indexed = True
         
         print(f"Loaded boolean index from {path}")
