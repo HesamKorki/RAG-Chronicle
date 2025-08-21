@@ -158,18 +158,55 @@ def get_retriever(retriever_type: str, config: Config):
     return retriever_class()
 
 
-def build_index(config: Config, dataset: str, retriever_type: str):
-    """Build index for a specific retriever and dataset."""
-    print(f"Building index for {retriever_type} retriever on {dataset} dataset...")
+def build_index(config: Config, dataset: str, retriever_type: Optional[str] = None):
+    """Build index for a specific retriever and dataset, or all retrievers if none specified."""
     
-    # Load dataset
-    dataset_loader = SquadDataset(config.dataset)
-    dataset_loader.load()
+    # Define all available retrievers (excluding 'none' since it doesn't need an index)
+    all_retrievers = ["boolean", "tfidf", "bm25", "dense", "sota"]
     
-    # Get corpus
-    corpus = dataset_loader.get_corpus()
-    print(f"Corpus size: {len(corpus)} documents")
-    
+    if retriever_type is None:
+        # Build all retrievers
+        print(f"Building indexes for all retrievers on {dataset} dataset...")
+        print(f"Retrievers to build: {', '.join(all_retrievers)}")
+        
+        # Load dataset once for all retrievers
+        dataset_loader = SquadDataset(config.dataset)
+        dataset_loader.load()
+        corpus = dataset_loader.get_corpus()
+        print(f"Corpus size: {len(corpus)} documents")
+        
+        for i, ret_type in enumerate(all_retrievers, 1):
+            print(f"\n{'='*70}")
+            print(f"🔧 BUILDING INDEX {i}/{len(all_retrievers)}: {ret_type.upper()}")
+            print(f"📊 Progress: {i/len(all_retrievers)*100:.1f}% complete")
+            print(f"{'='*70}")
+            
+            try:
+                _build_single_index(config, dataset, ret_type, corpus)
+                print(f"✅ COMPLETED: {ret_type} index built successfully")
+            except Exception as e:
+                print(f"❌ ERROR: Failed to build {ret_type} index: {e}")
+                continue
+        
+        print(f"\n{'='*70}")
+        print("🎉 INDEX BUILDING COMPLETE")
+        print(f"{'='*70}")
+        
+    else:
+        # Build single retriever
+        print(f"Building index for {retriever_type} retriever on {dataset} dataset...")
+        
+        # Load dataset
+        dataset_loader = SquadDataset(config.dataset)
+        dataset_loader.load()
+        corpus = dataset_loader.get_corpus()
+        print(f"Corpus size: {len(corpus)} documents")
+        
+        _build_single_index(config, dataset, retriever_type, corpus)
+
+
+def _build_single_index(config: Config, dataset: str, retriever_type: str, corpus: List[str]):
+    """Build index for a single retriever."""
     # Get retriever
     retriever = get_retriever(retriever_type, config)
     
@@ -284,6 +321,7 @@ def run_experiment(config: Config, dataset: str, retriever_type: str, k: int = 5
         
         # Find ground truth document ID and text
         ground_truth_doc_id = dataset_loader.find_ground_truth_doc_id(qa_pair)
+        ground_truth_corpus_id = dataset_loader.find_ground_truth_corpus_id(qa_pair)
         ground_truth_doc_text = None
         if ground_truth_doc_id is not None and ground_truth_doc_id < len(dataset_loader.documents):
             ground_truth_doc_text = dataset_loader.documents[ground_truth_doc_id].text
@@ -295,6 +333,7 @@ def run_experiment(config: Config, dataset: str, retriever_type: str, k: int = 5
             "ground_truth": qa_pair.answer,
             "ground_truth_answers": qa_pair.answers,
             "ground_truth_doc_id": ground_truth_doc_id,
+            "ground_truth_corpus_id": ground_truth_corpus_id,
             "ground_truth_doc_text": ground_truth_doc_text,
             "answer": generation_result["answer"],  # Changed from predicted_answer to match evaluation expectation
             "predicted_answer": generation_result["answer"],
@@ -333,11 +372,11 @@ def run_experiment(config: Config, dataset: str, retriever_type: str, k: int = 5
     # Retrieval metrics (only if retriever was used)
     if retriever is not None:
         retrieved_docs_list = [result["retrieved_docs"] for result in results]
-        # Use actual ground truth documents as relevant documents
+        # Use actual ground truth documents as relevant documents (using corpus IDs)
         relevant_docs_list = []
         for result in results:
-            if result["ground_truth_doc_id"] is not None:
-                relevant_docs_list.append({result["ground_truth_doc_id"]})
+            if result["ground_truth_corpus_id"] is not None:
+                relevant_docs_list.append({result["ground_truth_corpus_id"]})
             else:
                 relevant_docs_list.append(set())  # No relevant docs if ground truth not found
         retrieval_metrics = evaluate_retrieval_batch(retrieved_docs_list, relevant_docs_list, [k])
@@ -470,6 +509,7 @@ def run_experiment_with_qa_pairs(config: Config, dataset: str, retriever_type: s
         
         # Find ground truth document ID and text
         ground_truth_doc_id = dataset_loader.find_ground_truth_doc_id(qa_pair)
+        ground_truth_corpus_id = dataset_loader.find_ground_truth_corpus_id(qa_pair)
         ground_truth_doc_text = None
         if ground_truth_doc_id is not None and ground_truth_doc_id < len(dataset_loader.documents):
             ground_truth_doc_text = dataset_loader.documents[ground_truth_doc_id].text
@@ -481,6 +521,7 @@ def run_experiment_with_qa_pairs(config: Config, dataset: str, retriever_type: s
             "ground_truth": qa_pair.answer,
             "ground_truth_answers": qa_pair.answers,
             "ground_truth_doc_id": ground_truth_doc_id,
+            "ground_truth_corpus_id": ground_truth_corpus_id,
             "ground_truth_doc_text": ground_truth_doc_text,
             "answer": generation_result["answer"],
             "predicted_answer": generation_result["answer"],
@@ -518,11 +559,11 @@ def run_experiment_with_qa_pairs(config: Config, dataset: str, retriever_type: s
     # Retrieval metrics (only if retriever was used)
     if retriever is not None:
         retrieved_docs_list = [result["retrieved_docs"] for result in results]
-        # Use actual ground truth documents as relevant documents
+        # Use actual ground truth documents as relevant documents (using corpus IDs)
         relevant_docs_list = []
         for result in results:
-            if result["ground_truth_doc_id"] is not None:
-                relevant_docs_list.append({result["ground_truth_doc_id"]})
+            if result["ground_truth_corpus_id"] is not None:
+                relevant_docs_list.append({result["ground_truth_corpus_id"]})
             else:
                 relevant_docs_list.append(set())  # No relevant docs if ground truth not found
         retrieval_metrics = evaluate_retrieval_batch(retrieved_docs_list, relevant_docs_list, [k])
@@ -687,9 +728,9 @@ def main():
     # Build index command
     build_parser = subparsers.add_parser("build-index", help="Build retriever index")
     build_parser.add_argument("--dataset", default="squad", help="Dataset name")
-    build_parser.add_argument("--retriever", required=True, 
+    build_parser.add_argument("--retriever", 
                              choices=["boolean", "tfidf", "bm25", "dense", "sota"],
-                             help="Retriever type")
+                             help="Retriever type (builds all if not specified)")
     
     # Run experiment command
     run_parser = subparsers.add_parser("run", help="Run single experiment")

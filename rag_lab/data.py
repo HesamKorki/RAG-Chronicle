@@ -173,12 +173,20 @@ class SquadDataset:
         # Each document represents a unique paragraph from SQuAD
         corpus = []
         seen_texts = set()
+        self._corpus_to_doc_mapping = {}  # Maps corpus index to original document index
+        self._doc_to_corpus_mapping = {}  # Maps original document index to corpus index
         
-        for doc in self.documents:
+        corpus_idx = 0
+        for doc_idx, doc in enumerate(self.documents):
             # Use the main document text, not chunks
             if doc.text not in seen_texts:
                 corpus.append(doc.text)
                 seen_texts.add(doc.text)
+                
+                # Create bidirectional mapping
+                self._corpus_to_doc_mapping[corpus_idx] = doc_idx
+                self._doc_to_corpus_mapping[doc_idx] = corpus_idx
+                corpus_idx += 1
         
         return corpus
     
@@ -194,6 +202,16 @@ class SquadDataset:
             if document.text.strip() == qa_pair.context.strip():
                 return doc_idx
         return None
+    
+    def find_ground_truth_corpus_id(self, qa_pair: QAPair) -> Optional[int]:
+        """Find the corpus index that contains the ground truth answer for a QA pair."""
+        # First find the original document ID
+        doc_id = self.find_ground_truth_doc_id(qa_pair)
+        if doc_id is None:
+            return None
+        
+        # Convert to corpus index using the mapping
+        return self._doc_to_corpus_mapping.get(doc_id, None)
     
     def get_documents(self) -> List[Document]:
         """Get all documents."""
