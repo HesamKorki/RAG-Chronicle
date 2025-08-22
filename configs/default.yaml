@@ -1,17 +1,17 @@
 # Default configuration for RAG Lab experiments
 
-# Generator configuration (optimized for MPS)
+# Generator configuration (optimized for speed)
 generator:
   model_name: "Qwen/Qwen2.5-1.5B-Instruct"
-  max_new_tokens: 32
+  max_new_tokens: 16  # Covers 100% of SQuAD answers (max 9 tokens needed)
   temperature: 0.0
   top_p: 1.0
   seed: 42
-  context_token_budget: 1024
+  context_token_budget: 512  # Reduced from 1024 for speed
   stop_sequences: []
   device:
-    device: "auto"  # Will auto-detect mps/cpu
-    torch_dtype: "auto"
+    device: "cpu"  # Use CPU due to MPS memory limitations
+    torch_dtype: "float16"  # Use float16 for speed
 
 # Dataset configuration
 dataset:
@@ -82,7 +82,7 @@ sota:
   faiss_index_type: "IndexFlatIP"
   batch_size: 32
   k_rerank: 50
-  cross_encoder_model: "cross-encoder/ms-marco-MiniLM-L-12-v-2"
+  cross_encoder_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
   rerank_batch_size: 16
 
 # Logging

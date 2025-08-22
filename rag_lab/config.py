@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+import yaml
 
 import torch
 from pydantic import BaseModel, Field
@@ -152,6 +153,25 @@ class Config(BaseModel):
     
     # Reproducibility
     seed: int = Field(default=42)
+    
+    @classmethod
+    def from_yaml(cls, yaml_path: str = "configs/default.yaml"):
+        """Load configuration from YAML file."""
+        yaml_file = Path(yaml_path)
+        if not yaml_file.exists():
+            print(f"Warning: Config file {yaml_path} not found, using defaults")
+            return cls()
+        
+        try:
+            with open(yaml_file, 'r') as f:
+                yaml_data = yaml.safe_load(f)
+            
+            # Create config with YAML data
+            return cls(**yaml_data)
+        except Exception as e:
+            print(f"Error loading config from {yaml_path}: {e}")
+            print("Using default configuration")
+            return cls()
     
     def get_retriever_config(self, retriever_type: str):
         """Get configuration for a specific retriever type."""

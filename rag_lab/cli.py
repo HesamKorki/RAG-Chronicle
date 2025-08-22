@@ -764,7 +764,7 @@ def main():
         return
     
     # Load configuration
-    config = Config()
+    config = Config.from_yaml()
     config.setup_directories()
     
     # Execute command
